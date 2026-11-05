@@ -14,36 +14,94 @@ Schema layer.
 
 ## Status
 
-Experimental.  Implements the **2024-11-05** revision of the MCP
-specification.
+Experimental.  Implements the **2026-07-28** revision of the MCP
+specification ("MCP 2.0"), the stateless protocol:
+
+  - No `initialize` / `notifications/initialized` handshake and no
+    `ping`.  Every request carries its protocol version and the client
+    capabilities in `params._meta`
+    (`io.modelcontextprotocol/protocolVersion`,
+    `io.modelcontextprotocol/clientCapabilities`).  A request without
+    them is rejected with `-32602`; an unsupported version with
+    `UnsupportedProtocolVersion` (`-32022`, listing the supported
+    versions).  Legacy clients that send `initialize` get the same
+    error, which names the versions this server speaks.
+  - `server/discover` reports the supported versions, the capabilities
+    and the optional `instructions`.
+  - Every result carries `resultType: "complete"` and the server
+    identity in `_meta["io.modelcontextprotocol/serverInfo"]`.  The
+    results of `server/discover`, `tools/list`, `prompts/list`,
+    `resources/list`, `resources/templates/list` and `resources/read`
+    carry the `ttlMs` / `cacheScope` caching hints.
+  - Change notifications are only sent on streams opened with
+    `subscriptions/listen`, tagged with
+    `io.modelcontextprotocol/subscriptionId`.
+  - JSON-RPC batches are rejected (removed from MCP in 2025-06-18).
 
 Transports:
 
   - **stdio** — `library(mcp/stdio)`; newline-delimited JSON-RPC over
     stdin/stdout, the form used by the official `mcp` CLI and by
-    Claude Code's local-server configuration.
-  - **HTTP + SSE** — `library(mcp/http)`; long-lived SSE stream for
-    server-initiated notifications plus POSTs for client requests.
-    Sessions are keyed by the `Mcp-Session-Id` HTTP header.  Intended
-    for hosting on `www.swi-prolog.org` (behind a reverse proxy
-    handling TLS and auth).
+    Claude Code's local-server configuration.  Subscriptions share the
+    channel and end with `notifications/cancelled` from the client.
+  - **Streamable HTTP** — `library(mcp/http)`; a single endpoint,
+    `POST /mcp`.  Requests are answered with `application/json`;
+    `subscriptions/listen` is answered with a long-lived
+    `text/event-stream`.  There are no sessions (`Mcp-Session-Id` is
+    ignored), `GET`/`DELETE` return `405`.  The `MCP-Protocol-Version`,
+    `Mcp-Method` and `Mcp-Name` headers (and `Mcp-Param-*` headers for
+    tool arguments annotated with `x-mcp-header`) are validated against
+    the body (`400` + `HeaderMismatch`, `-32020`).  Requests with a
+    non-loopback `Origin` header are refused unless listed in the
+    setting `mcp_http:allowed_origins`.  Intended for hosting on
+    `www.swi-prolog.org` (behind a reverse proxy handling TLS and
+    auth).  The deprecated 2024-11-05 HTTP+SSE endpoints
+    (`/mcp/messages`, `/mcp/sse`) are gone.
 
 ## MCP capabilities
 
   - Tools (`tools/list`, `tools/call`,
-    `notifications/tools/list_changed`)
+    `notifications/tools/list_changed` via `subscriptions/listen`)
   - Resources (`resources/list`, `resources/read`,
     `resources/templates/list`)
   - Prompts (`prompts/list`, `prompts/get`)
 
-Progress notifications (`notifications/progress` and the
-`params._meta.progressToken` intake on requests) are not implemented.
-Tool calls reply with a single buffered JSON-RPC response; there is no
-intra-call streaming.  On the HTTP transport the `mcp_notify/2` path
-reaches only clients holding a `GET /sse` stream — the streamable-HTTP
-`POST /mcp` reply is sent as `application/json`, not as an SSE event
-stream, so a tool cannot interleave progress events into its own
-response.
+Errors follow the 2026-07-28 rules: an unknown tool, prompt or resource
+is `-32602` (Invalid params; the old `-32002` for resources is no
+longer used), while arguments that fail the tool's `inputSchema` and
+exceptions raised by a tool are returned as a tool result with
+`isError: true` so the model can self-correct.
+
+Not implemented: completions, the deprecated logging, sampling and
+roots features, multi round-trip requests (`InputRequiredResult`),
+progress notifications and the tasks extension.  An
+`io.modelcontextprotocol/logLevel` in `_meta` is validated but no
+`notifications/message` are sent.  Tool calls reply with a single
+buffered JSON-RPC response; there is no intra-call streaming.
+
+### Caching hints
+
+By default all cacheable results are returned with `ttlMs: 0`
+(immediately stale) and `cacheScope: "public"` (`"private"` for
+`resources/read`).  Override per method with the multifile hook
+`mcp_server:mcp_cache_hint(+Method, +Params, -TtlMs, -Scope)`, e.g.
+
+```prolog
+:- multifile mcp_server:mcp_cache_hint/4.
+mcp_server:mcp_cache_hint('tools/list', _, 300000, public).
+```
+
+### Notifications
+
+`mcp_notify(+Method, +Params)` delivers
+`notifications/tools/list_changed`,
+`notifications/prompts/list_changed`,
+`notifications/resources/list_changed` and
+`notifications/resources/updated` to the clients that opted in to them
+on a `subscriptions/listen` stream.  Which types are honoured is
+derived from `mcp_server_capabilities/1` (by default only
+`toolsListChanged`).  Other notifications are dropped, as the
+specification forbids sending types the client did not request.
 
 ## Writing a server
 
@@ -71,7 +129,8 @@ Run it as `swipl hello_server.pl`.  The server speaks MCP on
 stdin/stdout.
 
 `mcp_tool/3` is the only registration primitive: a name, a one-line
-description shown to the LLM, and a JSON Schema for the arguments.
+description shown to the LLM, and a JSON Schema for the arguments
+(`type: object` is implied when omitted).
 The matching Prolog predicate is `Name(+Args, -Result)`, where `Args`
 is the validated input dict and `Result` is either a string (auto-
 wrapped as a text content item), a dict (a single content item) or a
@@ -184,9 +243,9 @@ Targets are identified by a string name; multiple may coexist.
 Single tool, `mcp_reload_self`: run `make/0` inside the MCP server
 process to pick up source edits to the framework / tool modules
 without restarting the server.  Sends
-`notifications/tools/list_changed` afterwards so any new
-`mcp_tool/3` declarations become visible without an `/mcp`
-reconnect.
+`notifications/tools/list_changed` afterwards (to clients subscribed
+via `subscriptions/listen`) so any new `mcp_tool/3` declarations
+become visible without an `/mcp` reconnect.
 
 Intended for the developer's edit-test loop; do not enable in a
 public deployment (it gives the LLM the power to reload arbitrary
@@ -200,8 +259,8 @@ Runnable scripts under `examples/`:
   - `prolog_help.pl` — the full assistant suite (`prolog_help` +
     `swipl_kernel` + `target_toplevel` + `source` + `git` +
     `dev_reload`) over stdio.
-  - `prolog_help_http.pl` — same suite over HTTP + SSE on
-    `localhost:8080`.
+  - `prolog_help_http.pl` — same suite over Streamable HTTP on
+    `localhost:8080` (endpoint `POST /mcp`).
   - `target_toplevel.pl` — just the target-driver tools, useful as
     an "agent loop" companion.
 

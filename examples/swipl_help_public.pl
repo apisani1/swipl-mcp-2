@@ -87,6 +87,8 @@ See the docker/ subdirectory for the production-deployment recipe.
 % Provide /mcp/health to drive `health.sh` and allow inspecting the
 % server status.
 :- set_setting_default(http:cors, [*]).
+% Public read-only server: accept browser clients from any origin.
+:- set_setting_default(mcp_http:allowed_origins, ['*']).
 % Only allow the prolog_help file tools on files inside a source root.
 :- set_setting_default(mcp_prolog_help:restrict_files, true).
 :- http_handler(mcp(health), server_health, [id(server_health), priority(10)]).

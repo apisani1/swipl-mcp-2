@@ -12,6 +12,9 @@
 :- module(test_utils,
           [ tool_call/3,                 % +Name, +Args, -Text
             dispatch/2,                  % +Request, -Reply
+            dispatch_raw/2,              % +Request, -Reply
+            with_request_meta/2,         % +Request0, -Request
+            request_meta/1,              % -Meta
             stop_target/1,               % +Name (best-effort)
             with_temp_file/3             % +Content, -File, :Goal
           ]).
@@ -41,12 +44,49 @@ tool_call(Name, Args, Text) :-
 %   decode the single JSON reply that lands in it.  The `user:`
 %   module qualifier on the stream is purely formal -- mcp_dispatch/3
 %   discards it (its meta-arg is `?`, not a goal).
+%
+%   MCP 2026-07-28 requires every request to carry the protocol
+%   version and client capabilities in `params._meta`.  dispatch/2
+%   adds these (see with_request_meta/2); use dispatch_raw/2 to send
+%   Request unmodified.
 
-dispatch(Request, Reply) :-
+dispatch(Request0, Reply) :-
+    with_request_meta(Request0, Request),
+    dispatch_raw(Request, Reply).
+
+%!  dispatch_raw(+Request:dict, -Reply:dict) is det.
+%
+%   As dispatch/2, but does not add `_meta`.
+
+dispatch_raw(Request, Reply) :-
     with_output_to(
         string(Data),
         mcp_dispatch(user:current_output, Request, [])),
     atom_json_dict(Data, Reply, [value_string_as(string)]).
+
+%!  with_request_meta(+Request0:dict, -Request:dict) is det.
+%
+%   Add the mandatory per-request `_meta` (see request_meta/1) to the
+%   params of Request0 unless it already has a `_meta`.
+
+with_request_meta(Request0, Request) :-
+    Params0 = Request0.get(params, #{}),
+    (   get_dict('_meta', Params0, _)
+    ->  Request = Request0
+    ;   request_meta(Meta),
+        put_dict('_meta', Params0, Meta, Params),
+        put_dict(params, Request0, Params, Request)
+    ).
+
+%!  request_meta(-Meta:dict) is det.
+%
+%   The `_meta` object of a request from a minimal 2026-07-28 client.
+
+request_meta(#{ 'io.modelcontextprotocol/protocolVersion': "2026-07-28",
+                'io.modelcontextprotocol/clientInfo':
+                    #{name:"test", version:"0"},
+                'io.modelcontextprotocol/clientCapabilities': #{}
+              }).
 
 %!  stop_target(+Name:text) is det.
 %

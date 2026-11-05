@@ -48,7 +48,7 @@
 /** <module> Run our MCP server with HTTP transport
 
 MCP server hosting the prolog_help /  swipl_kernel / target / dev_reload
-suite over HTTP+SSE on localhost:8080.
+suite over the MCP 2026-07-28 Streamable HTTP transport on localhost:8080.
 
 Mirrors examples/prolog_help.pl but boots the  HTTP transport instead of
 stdio.
@@ -57,13 +57,13 @@ Run as:
 
     swipl examples/prolog_help_http.pl [option ...]
 
-Endpoints (use http:location/3 with alias `mcp` to modify)
+Endpoint:
 
-    - POST /mcp/messages
-    - GET  /mcp/sse
+    - POST /mcp
 
-Session id is the `Mcp-Session-Id` HTTP header  (minted by the server on
-the first POST that lacks it).
+Each POST carries one JSON-RPC request.  There are no sessions; change
+notifications are delivered on the SSE response to a
+`subscriptions/listen` request.  See library(mcp/http).
 */
 
 :- initialization(http_daemon, main).

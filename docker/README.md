@@ -30,10 +30,11 @@ make stop     # stop + rm
 
 The container listens on TCP 3410 inside; the published port defaults
 to 3410 on the host and is overridable with `make run PORT=...`.
-Endpoints (per the MCP 2024-11-05 transport):
+Endpoints (per the MCP 2026-07-28 Streamable HTTP transport):
 
-  - `POST /mcp/messages` -- JSON-RPC request, JSON reply + `Mcp-Session-Id` header
-  - `GET  /mcp/sse`      -- long-lived SSE stream for notifications
+  - `POST /mcp`        -- one JSON-RPC request per POST; JSON reply, or a
+                          long-lived SSE stream for `subscriptions/listen`
+  - `GET  /mcp/health` -- server health (used by `health.sh`)
 
 ## Rebuilding individual layers
 
@@ -50,22 +51,23 @@ then `docker build`.
 
 ## Health check
 
-`HEALTHCHECK` POSTs an `initialize` request through to
-`/mcp/messages`; the container is unhealthy when the dispatcher can't
-respond to a valid JSON-RPC request within 5 s.  Health-check output
+`HEALTHCHECK` runs `health.sh`, which fetches `/mcp/health`; the
+container is unhealthy when the server can't respond within 5 s.  Health-check output
 goes to `/tmp/health.log` inside the container.
 
 ## Behind a reverse proxy
 
 For deployment on `www.swi-prolog.org`, terminate TLS in nginx and
-proxy `/mcp/messages` and `/mcp/sse` to `http://localhost:3410`.  The
-SSE handler holds the connection open indefinitely with a 15 s
-heartbeat; configure the proxy with a matching or larger read
-timeout (`proxy_read_timeout 1d;` is typical) and disable response
-buffering for the SSE location:
+proxy `/mcp` to `http://localhost:3410`.  The response to a
+`subscriptions/listen` request is an SSE stream that stays open
+indefinitely with a 15 s heartbeat; configure the proxy with a
+matching or larger read timeout (`proxy_read_timeout 1d;` is typical)
+and disable response buffering (the server also sends
+`X-Accel-Buffering: no`).  The proxy must forward the `MCP-*`/`Mcp-*`
+request headers unchanged:
 
 ```
-location /mcp/sse {
+location /mcp {
     proxy_pass             http://localhost:3410;
     proxy_buffering        off;
     proxy_read_timeout     1d;

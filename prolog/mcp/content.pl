@@ -34,10 +34,14 @@
           [ mcp_text/2,                 % +Text, -Item
             mcp_image/3,                % +Base64Data, +MimeType, -Item
             mcp_resource_link/2,        % +URI, -Item
+            mcp_resource_link/3,        % +URI, +Options, -Item
+            mcp_embedded_resource/2,    % +Resource, -Item
             mcp_text_resource/3,        % +URI, +Text, -Resource
             mcp_blob_resource/4,        % +URI, +Base64Data, +MimeType, -Resource
             mcp_to_content_list/2       % +RawContent, -ContentList
           ]).
+
+:- use_module(library(apply), [foldl/4]).
 
 /** <module> Helpers to build MCP content and resource objects.
 
@@ -58,7 +62,39 @@ mcp_text(Text, #{type:"text", text:Text}).
 mcp_image(Data, Mime, #{type:"image", data:Data, mimeType:Mime}).
 
 %!  mcp_resource_link(+URI, -Item) is det.
-mcp_resource_link(URI, #{type:"resource", resource: #{uri:URI}}).
+%!  mcp_resource_link(+URI, +Options, -Item) is det.
+%
+%   Create a `resource_link` content item that refers to URI without
+%   embedding its contents.  Options:
+%
+%     - name(+String)
+%       Resource name; defaults to URI.
+%     - title(+String)
+%     - description(+String)
+%     - mime_type(+String)
+
+mcp_resource_link(URI, Item) :-
+    mcp_resource_link(URI, [], Item).
+
+mcp_resource_link(URI, Options, Item) :-
+    (   memberchk(name(Name), Options) -> true ; Name = URI ),
+    Item0 = #{type:"resource_link", uri:URI, name:Name},
+    foldl(link_option, [title-title, description-description,
+                        mime_type-mimeType], Item0-Options, Item-_).
+
+link_option(Opt-Key, Item0-Options, Item-Options) :-
+    Term =.. [Opt, Value],
+    (   memberchk(Term, Options)
+    ->  put_dict(Key, Item0, Value, Item)
+    ;   Item = Item0
+    ).
+
+%!  mcp_embedded_resource(+Resource, -Item) is det.
+%
+%   Embed Resource, as created by mcp_text_resource/3 or
+%   mcp_blob_resource/4, as a `resource` content item.
+
+mcp_embedded_resource(Resource, #{type:"resource", resource:Resource}).
 
 %!  mcp_text_resource(+URI, +Text, -Resource) is det.
 mcp_text_resource(URI, Text,

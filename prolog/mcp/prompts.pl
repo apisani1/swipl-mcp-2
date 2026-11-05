@@ -35,6 +35,7 @@
             get_prompt/2                % +Params, -Result
           ]).
 :- use_module(library(debug), [debug/3]).
+:- use_module(library(apply), [include/3, maplist/3]).
 :- use_module(server).
 
 /** <module> prompts/list and prompts/get
@@ -61,11 +62,45 @@ current_prompt(#{name:NameS, description:Desc, arguments:Args}) :-
 %   Params is `#{name:Name, arguments:Args}`.
 
 get_prompt(Params, #{messages:Messages, description:Desc}) :-
-    NameS = Params.get(name),
+    (   get_dict(name, Params, NameS),
+        string(NameS)
+    ->  true
+    ;   throw(mcp_error(-32602, "Invalid params",
+                        "prompts/get requires a string name"))
+    ),
     atom_string(Name, NameS),
     Args = Params.get(arguments, #{}),
-    (   mcp_current_prompt(Module, Name, Desc, _Args)
-    ->  debug(mcp(prompts), 'get ~w:~w(~p)', [Module, Name, Args]),
+    (   is_dict(Args)
+    ->  true
+    ;   throw(mcp_error(-32602, "Invalid params",
+                        "prompts/get arguments must be an object"))
+    ),
+    (   mcp_current_prompt(Module, Name, Desc, ArgSpecs)
+    ->  check_required_arguments(ArgSpecs, Args),
+        debug(mcp(prompts), 'get ~w:~w(~p)', [Module, Name, Args]),
         call(Module:Name, Args, Messages)
-    ;   throw(mcp_error(-32602, "Unknown prompt", #{name: NameS}))
+    ;   format(string(Msg), "Unknown prompt: ~w", [NameS]),
+        throw(mcp_error(-32602, Msg, #{name: NameS}))
     ).
+
+%!  check_required_arguments(+ArgSpecs:list, +Args:dict) is det.
+%
+%   Raise `Invalid params` if a required prompt argument is missing.
+
+check_required_arguments(ArgSpecs, Args) :-
+    include(missing_argument(Args), ArgSpecs, Missing),
+    (   Missing == []
+    ->  true
+    ;   maplist(argument_name, Missing, Names),
+        throw(mcp_error(-32602, "Missing required prompt arguments",
+                        #{missing:Names}))
+    ).
+
+missing_argument(Args, Spec) :-
+    is_dict(Spec),
+    true == Spec.get(required),
+    atom_string(Key, Spec.get(name)),
+    \+ get_dict(Key, Args, _).
+
+argument_name(Spec, Name) :-
+    Name = Spec.get(name).

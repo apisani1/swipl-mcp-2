@@ -36,22 +36,36 @@
           ]).
 :- use_module(library(mcp/server),
               [ mcp_dispatch/3,
-                mcp_set_rpc_stream/1,
                 mcp_current_tool/4,
                 mcp_current_resource/4,
-                mcp_current_prompt/4
+                mcp_current_prompt/4,
+                mcp_subscription_remove/1
               ]).
-:- use_module(library(json), [json_read_dict/3]).
+:- use_module(library(json), [atom_json_dict/3, json_write_dict/3]).
+:- use_module(library(readutil), [read_line_to_string/2]).
 :- use_module(library(debug), [debug/3]).
 :- use_module(library(aggregate), [aggregate_all/3]).
 
 /** <module> stdio transport for MCP servers
 
-Reads  newline-delimited  JSON-RPC  requests  from    stdin  and  writes
-responses to stdout. Before entering the loop the original stdout stream
-is captured, Prolog's `user_output`  is  bound   to  a  null  stream and
-`user_error` is bound to a null stream   if  writing an initial feedback
-message fails.
+Implements the stdio transport of MCP 2026-07-28.  Reads
+newline-delimited JSON-RPC messages from stdin and writes responses
+and notifications to stdout, one message per line. Before entering the
+loop the original stdout stream is captured, Prolog's `user_output`  is
+bound to a null stream and `user_error` is bound to a null stream if
+writing an initial feedback message fails.
+
+The protocol is stateless: there is no `initialize` handshake and each
+request is validated on its own (see library(mcp/lifecycle)).  The
+server never writes JSON-RPC _requests_ to stdout.  Besides responses
+it only writes the change notifications a client opted in to with
+`subscriptions/listen`; each carries the subscription id in `_meta`.
+A subscription ends when the client sends `notifications/cancelled`
+for the `subscriptions/listen` request or closes stdin.
+
+A line that is not valid JSON is answered with a JSON-RPC `Parse error`
+(-32700, `id: null`) and the server continues with the next line.  The
+server exits when stdin is closed.
 
 ## Logging
 
@@ -82,17 +96,14 @@ mcp_stdio_run :-
     current_output(StdOut),
     set_stream(StdIn,  encoding(utf8)),
     set_stream(StdOut, encoding(utf8)),
-    %  Make a stream pair that we will use for the JSON-RPC channel.
-    stream_pair(RpcStream, StdIn, StdOut),
-    %  Stash for server-initiated notifications (mcp_notify/2).
-    mcp_set_rpc_stream(RpcStream),
     redirect_user_io_to_null,
     open_request_log,
-    catch(run_loop(RpcStream),
+    catch(run_loop(StdIn, StdOut),
           Error,
           (   print_message(error, Error),
               halt(1)
           )),
+    mcp_subscription_remove(sub(StdOut, _)),
     halt(0).
 
 %!  open_request_log is det.
@@ -164,19 +175,57 @@ services(Tools, Resources, Prompts) :-
     aggregate_all(count, mcp_current_prompt(_,_,_,_), Prompts).
 
 
-run_loop(Stream) :-
-    json_read_dict(Stream, Request,
-                   [ end_of_file(end_of_file),
-                     value_string_as(string)
-                   ]),
-    (   Request == end_of_file
+%!  run_loop(+In, +Out) is det.
+%
+%   Process messages until end of file.  Messages are delimited by
+%   newlines and may not contain embedded newlines, so we read a line
+%   at a time.  This allows recovering from malformed input.
+
+run_loop(In, Out) :-
+    read_line_to_string(In, Line),
+    (   Line == end_of_file
     ->  true
-    ;   debug(mcp(stdio), 'received: ~p', [Request]),
-        mcp_log(request, Request),
-        catch(mcp_dispatch(user:Stream, Request, []),
-              Error,
-              (   mcp_log(dispatch_error, Error),
-                  print_message(error, Error)
-              )),
-        run_loop(Stream)
+    ;   split_string(Line, "", " \t\r", [""])
+    ->  run_loop(In, Out)                       % ignore empty lines
+    ;   parse_message(Line, Result),
+        (   Result = message(Message)
+        ->  debug(mcp(stdio), 'received: ~p', [Message]),
+            mcp_log(request, Message),
+            catch(mcp_dispatch(user:Out, Message, []),
+                  Error,
+                  (   mcp_log(dispatch_error, Error),
+                      print_message(error, Error)
+                  ))
+        ;   Result = error(ParseError),
+            mcp_log(parse_error, Line),
+            parse_error_reply(Out, ParseError)
+        ),
+        run_loop(In, Out)
     ).
+
+parse_message(Line, Result) :-
+    catch(atom_json_dict(Line, Message, [value_string_as(string)]),
+          Error, true),
+    (   var(Error)
+    ->  Result = message(Message)
+    ;   Result = error(Error)
+    ),
+    !.
+parse_message(_, error(_)).
+
+parse_error_reply(Out, Error) :-
+    (   nonvar(Error)
+    ->  message_to_string(Error, Msg)
+    ;   Msg = "Invalid JSON"
+    ),
+    with_mutex(mcp_rpc_output,
+               ( json_write_dict(Out,
+                                 #{ jsonrpc:"2.0", id:null,
+                                    error: #{ code: -32700,
+                                              message: "Parse error",
+                                              data: Msg }
+                                  },
+                                 [width(0)]),
+                 nl(Out),
+                 flush_output(Out)
+               )).
