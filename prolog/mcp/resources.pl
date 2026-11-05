@@ -71,7 +71,7 @@ list_resource_templates(Templates) :-
     findall(T, current_template(T), Templates).
 
 current_template(T) :-
-    mcp_current_resource(_Module, Tmpl, Description, Options),
+    mcp_current_resource_template(_Module, Tmpl, Description, Options),
     option(name(Name), Options, Tmpl),
     option(mime_type(Mime), Options, "text/plain"),
     T = #{uriTemplate:Tmpl, name:Name,
@@ -79,15 +79,22 @@ current_template(T) :-
 
 %!  read_resource(+Params, -Result) is det.
 %
-%   Params is `#{uri:URI}`.
+%   Params is `#{uri:URI}`.  As of MCP 2026-07-28 an unknown resource is
+%   reported with the JSON-RPC `Invalid params` code (-32602); the old
+%   `-32002` code must no longer be used.
 
 read_resource(Params, #{contents:Contents}) :-
-    URI = Params.get(uri),
+    (   get_dict(uri, Params, URI),
+        string(URI)
+    ->  true
+    ;   throw(mcp_error(-32602, "Invalid params",
+                        "resources/read requires a string uri"))
+    ),
     (   match_static(URI, Module, Options)
     ->  call_static(Module, URI, Options, Contents)
     ;   match_template(URI, Module, Tmpl, Options, Bindings)
     ->  call_template(Module, URI, Bindings, Tmpl, Options, Contents)
-    ;   throw(mcp_error(-32602, "Unknown resource", #{uri:URI}))
+    ;   throw(mcp_error(-32602, "Resource not found", #{uri:URI}))
     ).
 
 match_static(URI, Module, Options) :-

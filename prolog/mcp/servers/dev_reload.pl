@@ -60,9 +60,10 @@ Tool registered:
         the MCP server.  Returns the textual output of make (the \c
         'Loaded …', warning and error messages).\n\n\c
         After the reload, the server sends \c
-        notifications/tools/list_changed so the Claude Code client \c
-        re-fetches tools/list; new mcp_tool/3 declarations therefore \c
-        become visible without /mcp reconnect.\n\n\c
+        notifications/tools/list_changed to clients subscribed via \c
+        subscriptions/listen so they re-fetch tools/list; new \c
+        mcp_tool/3 declarations therefore become visible without \c
+        /mcp reconnect.\n\n\c
         Caveat: if a previous bad reload left runtime state \c
         inconsistent, make/0 does not unwind it.  Symptom: \c
         subsequent calls fail with 'Internal error' even though \c
@@ -73,11 +74,12 @@ Tool registered:
 mcp_reload_self(_Args, Text) :-
     run_collect_messages(make, [_]>>true, Result, Messages),
     maplist(render_message, Messages, Rendered),
-    %  Tell the client to re-fetch tools/list -- new mcp_tool/3
-    %  declarations from the reloaded source are otherwise invisible
-    %  to it (the client caches the list at initialize time).
-    %  Requires tools.listChanged:true in the capabilities, which
-    %  library(mcp/lifecycle) declares.
+    %  Tell subscribed clients to re-fetch tools/list -- new
+    %  mcp_tool/3 declarations from the reloaded source are otherwise
+    %  invisible to a client that caches the list.  Only delivered to
+    %  clients that opted in with subscriptions/listen
+    %  (toolsListChanged), which requires tools.listChanged:true in
+    %  mcp_server_capabilities/1.
     catch(mcp_notify('notifications/tools/list_changed', #{}),
           error(_,_), true),
     reload_text(Result, Rendered, Text).

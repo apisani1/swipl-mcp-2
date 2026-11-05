@@ -49,21 +49,43 @@ Handler contract:
 
     Handler(+Args:dict, -Content)
 
-If the call raises an exception the result is reported back with
-`isError:true` so the LLM can recover, rather than as a JSON-RPC
-error.  Schema-validation failures use the JSON-RPC `Invalid params`
-error code -32602 because they indicate a client-side mistake.
+Following the MCP 2026-07-28 error model:
+
+  - An unknown tool or a malformed `tools/call` request is a protocol
+    error (JSON-RPC `Invalid params`, -32602).
+  - Arguments that do not validate against the tool's `inputSchema`
+    and exceptions raised by the handler are _tool execution errors_:
+    they are reported in a normal result with `isError:true` so the
+    LLM can see them and self-correct.
 */
 
 %!  list_tools(-Tools:list) is det.
+%
+%   Tools are listed in registration order, which is deterministic for
+%   a given server configuration (the specification asks for a
+%   deterministic order to support client-side and prompt caching).
 
 list_tools(Tools) :-
     findall(Tool, current_tool(Tool), Tools).
 
 current_tool(#{name:NameS, description:Desc, inputSchema:Schema}) :-
     mcp_current_tool(Module, Name, Desc, _Compiled),
-    mcp_current_tool_raw_schema(Module, Name, Schema),
+    mcp_current_tool_raw_schema(Module, Name, Schema0),
+    object_schema(Schema0, Schema),
     atom_string(Name, NameS).
+
+%!  object_schema(+Schema0, -Schema) is det.
+%
+%   Tool arguments are always objects and the specification requires
+%   `type: "object"` at the root of `inputSchema`.  Add it if the
+%   declaration left it implicit.
+
+object_schema(Schema0, Schema) :-
+    is_dict(Schema0),
+    \+ get_dict(type, Schema0, _),
+    !,
+    put_dict(type, Schema0, object, Schema).
+object_schema(Schema, Schema).
 
 
 %!  call_tool(+Params, -Result) is det.
@@ -71,22 +93,49 @@ current_tool(#{name:NameS, description:Desc, inputSchema:Schema}) :-
 %   Params is `#{name:Name, arguments:Args}`.
 
 call_tool(Params, Result) :-
-    NameS = Params.get(name),
+    (   get_dict(name, Params, NameS),
+        string(NameS)
+    ->  true
+    ;   throw(mcp_error(-32602, "Invalid params",
+                        "tools/call requires a string name"))
+    ),
     atom_string(Name, NameS),
     Args = Params.get(arguments, #{}),
+    (   is_dict(Args)
+    ->  true
+    ;   throw(mcp_error(-32602, "Invalid params",
+                        "tools/call arguments must be an object"))
+    ),
     (   mcp_current_tool(Module, Name, _Desc, CompiledSchema)
-    ->  validate_args(CompiledSchema, Args),
-        run_tool(Module, Name, Args, Result)
-    ;   throw(mcp_error(-32602, "Unknown tool", #{name: NameS}))
+    ->  validate_args(CompiledSchema, Args, Status),
+        (   Status == ok
+        ->  run_tool(Module, Name, Args, Result)
+        ;   Status = invalid(Message),
+            tool_error_result(Message, Result)
+        )
+    ;   format(string(Msg), "Unknown tool: ~w", [NameS]),
+        throw(mcp_error(-32602, Msg, #{name: NameS}))
     ).
 
-validate_args(CompiledSchema, Args) :-
-    Error = error(_,_),
-    catch(json_check(CompiledSchema, Args, []),
-          Error,
-          (   message_to_string(Error, Msg),
-              throw(mcp_error(-32602, "Invalid params", #{data:Msg}))
-          )).
+%!  validate_args(+CompiledSchema, +Args, -Status) is det.
+%
+%   Status is `ok` if Args is valid against the tool's input schema
+%   and invalid(Message) otherwise.
+
+validate_args(CompiledSchema, Args, Status) :-
+    Error = error(Formal,_),
+    (   catch(json_check(CompiledSchema, Args, []),
+              Error,
+              true)
+    ->  true
+    ;   Error = error(failed(json_check), _)
+    ),
+    (   var(Formal)
+    ->  Status = ok
+    ;   message_to_string(Error, Msg),
+        format(string(Message), "Invalid arguments: ~w", [Msg]),
+        Status = invalid(Message)
+    ).
 
 run_tool(Module, Name, Args, Result) :-
     debug(mcp(tools), 'call ~w:~w(~p)', [Module, Name, Args]),
@@ -105,6 +154,9 @@ run_tool(Module, Name, Args, Result) :-
         Result = #{content:Content, isError:false}
     ).
 
-tool_error(Error, #{content:[#{type:"text", text:Msg}], isError:true}) :-
+tool_error(Error, Result) :-
     message_to_string(Error, Msg),
-    debug(mcp(tools), 'tool raised: ~w', [Msg]).
+    debug(mcp(tools), 'tool raised: ~w', [Msg]),
+    tool_error_result(Msg, Result).
+
+tool_error_result(Msg, #{content:[#{type:"text", text:Msg}], isError:true}).
